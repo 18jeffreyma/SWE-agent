@@ -180,12 +180,23 @@ class SimpleBatchInstance(BaseModel):
         if "image_assets" in instance:
             issue_images = json.loads(instance["image_assets"])["problem_statement"]
             extra_fields["issue_images"] = issue_images
+        
+        fields = {
+            "image_name": image_name,
+            "problem_statement": instance["problem_statement"],
+            "instance_id": iid,
+            "repo_name": "testbed",
+            "base_commit": instance["base_commit"],
+        }    
+        
+        # SWEPerf specific fields
+        sweperf_fields = ["workload", "test_cmd", "rebuild_cmd"]
+        for field in sweperf_fields:
+            if field in instance:
+                extra_fields[field] = instance[field]
+        
         return cls(
-            image_name=image_name,
-            problem_statement=instance["problem_statement"],
-            instance_id=iid,
-            repo_name="testbed",
-            base_commit=instance["base_commit"],
+            **fields,
             extra_fields=extra_fields,
         )
 
@@ -414,6 +425,82 @@ class SWESmithInstances(BaseModel, AbstractInstanceSource):
         return f"swesmith_{self.path.stem}"
 
 
+class SWEPerfInstances(BaseModel, AbstractInstanceSource):
+    """Load instances from SWE-bench."""
+
+    subset: Literal["full"] = "full"
+    """Subset of swe-bench to use"""
+
+    # IMPORTANT: Do not call this `path`, because then if people do not specify instance.type,
+    # it might be resolved to ExpertInstancesFromFile or something like that.
+    path_override: str | Path | None = None
+    """Allow to specify a different huggingface dataset name or path to a huggingface
+    dataset. This will override the automatic path set by `subset`.
+    """
+
+    split: Literal["test"] = "test"
+
+    deployment: DeploymentConfig = Field(
+        default_factory=lambda: DockerDeploymentConfig(image="python:3.11"),
+    )
+    """Deployment configuration. Note that the image_name option is overwritten by the images specified in the task instances.
+    """
+
+    type: Literal["swe_perf"] = "swe_perf"
+    """Discriminator for (de)serialization/CLI. Do not change."""
+
+    filter: str = ".*"
+    """Regular expression to filter the instances by instance id."""
+    slice: str = ""
+    """Select only a slice of the instances (after filtering by `filter`).
+    Possible values are stop or start:stop or start:stop:step.
+    (i.e., it behaves exactly like python's list slicing `list[slice]`).
+    """
+    shuffle: bool = False
+    """Shuffle the instances (before filtering and slicing)."""
+
+    evaluate: bool = False
+    """Run sb-cli to evaluate"""
+    
+    use_cpu_groups: bool = True
+    """Use CPU groups for SWEPerf instances. This is useful to avoid conflicts with other SWEPerf instances running on the same machine.
+    If set to True, we will evenly distribute CPUs across each worker.
+    """
+
+    def _get_dataset_path(self) -> str:
+        if self.path_override is not None:
+            return str(self.path_override)
+
+        dataset_mapping = {
+            "full": "sweperf/sweperf",
+        }
+
+        if self.subset not in dataset_mapping:
+            msg = f"Unsupported subset: {self.subset}"
+            raise ValueError(msg)
+
+        return dataset_mapping[self.subset]
+
+    def get_instance_configs(self) -> list[BatchInstance]:
+        from datasets import load_dataset
+
+        self.deployment.remove_images = True  # Always remove images for SWEPerf to avoid conflicts
+
+        ds: list[dict[str, Any]] = load_dataset(self._get_dataset_path(), split=self.split)  # type: ignore
+
+        if isinstance(self.deployment, DockerDeploymentConfig):
+            self.deployment.platform = "linux/amd64"
+
+        instances = [
+            SimpleBatchInstance.from_swe_bench(instance).to_full_batch_instance(self.deployment) for instance in ds
+        ]
+        return _filter_batch_items(instances, filter_=self.filter, slice_=self.slice, shuffle=self.shuffle)
+
+    @property
+    def id(self) -> str:
+        return f"swe_perf_{self.subset}_{self.split}"
+
+
 BatchInstanceSourceConfig = (
-    InstancesFromHuggingFace | InstancesFromFile | SWEBenchInstances | ExpertInstancesFromFile | SWESmithInstances
+    InstancesFromHuggingFace | InstancesFromFile | SWEBenchInstances | ExpertInstancesFromFile | SWESmithInstances | SWEPerfInstances
 )

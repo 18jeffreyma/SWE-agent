@@ -32,6 +32,8 @@ With [green]filter[/green], you can select specific instances, e.g., [green]--in
 import getpass
 import json
 import logging
+import os
+import queue
 import random
 import sys
 import time
@@ -71,6 +73,7 @@ from sweagent.utils.log import (
     set_stream_handler_levels,
 )
 
+from swerex.deployment.config import DockerDeploymentConfig
 
 class RunBatchConfig(BaseSettings, cli_implicit_flags=False):
     instances: BatchInstanceSourceConfig = Field(description="Instances to run.")
@@ -134,6 +137,26 @@ class _BreakLoop(Exception):
     """Used for internal control flow"""
 
 
+def divide_cpus_among_workers(num_workers):
+    current_cpus = list(os.sched_getaffinity(0))
+    num_cpus = len(current_cpus)
+    if num_workers <= 0:
+        raise ValueError("Number of workers must be greater than 0")
+
+    base_cpus_per_worker = num_cpus // num_workers
+    remainder = num_cpus % num_workers
+
+    # Divide this into groups.
+    cpu_groups = [
+        current_cpus[i * base_cpus_per_worker : (i + 1) * base_cpus_per_worker]
+        for i in range(num_workers)
+    ]
+    print(f"Divided {num_cpus} CPUs into {num_workers} groups, each with {base_cpus_per_worker} CPUs.")
+    print(f"CPU groups: {cpu_groups}")
+
+    return cpu_groups
+
+
 class RunBatch:
     def __init__(
         self,
@@ -147,6 +170,7 @@ class RunBatch:
         num_workers: int = 1,
         progress_bar: bool = True,
         random_delay_multiplier: float = 0.3,
+        use_cpu_groups: bool = False,
     ):
         """Note: When initializing this class, make sure to add the hooks that are required by your actions.
         See `from_config` for an example.
@@ -184,6 +208,13 @@ class RunBatch:
         )
         self._show_progress_bar = progress_bar
         self._random_delay_multiplier = random_delay_multiplier
+        
+        self.cpu_groups_queue = None
+        if use_cpu_groups:
+            self.cpu_groups_queue = queue.Queue()
+            cpu_groups = divide_cpus_among_workers(self._num_workers)
+            for group in cpu_groups:
+                self.cpu_groups_queue.put_nowait(group)
 
     @property
     def _model_id(self) -> str:
@@ -210,6 +241,9 @@ class RunBatch:
             )
             raise ValueError(msg)
         logger.debug("The first instance is %s", f"{instances[0]!r}")
+        
+        use_cpu_groups = getattr(config.instances, "use_cpu_groups", False)
+        
         rb = cls(
             instances=instances,
             agent_config=config.agent,
@@ -219,6 +253,7 @@ class RunBatch:
             num_workers=config.num_workers,
             progress_bar=config.progress_bar,
             random_delay_multiplier=config.random_delay_multiplier,
+            use_cpu_groups=use_cpu_groups,
         )
         if isinstance(config.instances, SWEBenchInstances) and config.instances.evaluate:
             from sweagent.run.hooks.swe_bench_evaluate import SweBenchEvaluate
@@ -331,6 +366,19 @@ class RunBatch:
             self._remove_instance_log_file_handlers(instance.problem_statement.id)
 
     def _run_instance(self, instance: BatchInstance) -> AgentRunResult:
+        # Hack: get a cpu_groups from global queue.
+        cpu_groups = None
+        if self.cpu_groups_queue is not None:
+            try:
+                cpu_groups = self.cpu_groups_queue.get_nowait()
+                if isinstance(instance.env.deployment, DockerDeploymentConfig):                    
+                    instance.env.deployment.docker_args.extend(
+                        ["--cpuset-cpus", ",".join(str(cpu) for cpu in cpu_groups)]
+                    )
+                    
+            except queue.Empty:
+                self.logger.warning("No CPU groups available, running without CPU groups.")
+        
         output_dir = Path(self.output_dir) / instance.problem_statement.id
         output_dir.mkdir(parents=True, exist_ok=True)
         self.agent_config.name = f"{instance.problem_statement.id}"
@@ -371,6 +419,10 @@ class RunBatch:
             env.close()
         save_predictions(self.output_dir, instance.problem_statement.id, result)
         self._chooks.on_instance_completed(result=result)
+        
+        if cpu_groups is not None:
+            self.cpu_groups_queue.put_nowait(cpu_groups) 
+
         return result
 
     def should_skip(self, instance: BatchInstance) -> bool | str:
