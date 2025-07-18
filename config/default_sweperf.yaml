@@ -11,10 +11,11 @@ instances:
     remove_container: true
 agent:
   model:
-    name: gemini/gemini-2.5-flash
-    api_key: key!!!
+    # name: gemini/gemini-2.5-flash
+    name: gemini/gemini-2.5-flash-lite-preview-06-17
+    # Put your Gemini API key in the .env file as GEMINI_API_KEY=...
     per_instance_cost_limit: 5.0
-    per_instance_call_limit: 100
+    per_instance_call_limit: 200
     temperature: 0.0
     delay: 5.0
     retry:
