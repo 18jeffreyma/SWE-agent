@@ -467,6 +467,11 @@ class SWEPerfInstances(BaseModel, AbstractInstanceSource):
     If set to True, we will evenly distribute CPUs across each worker.
     """
 
+    post_startup_commands: list[str] = Field(default_factory=list)
+    """Post startup commands to run in the testbed environment.
+    These commands are run after the environment is set up but before the problem statement is executed.
+    """
+
     def _get_dataset_path(self) -> str:
         if self.path_override is not None:
             return str(self.path_override)
@@ -494,7 +499,13 @@ class SWEPerfInstances(BaseModel, AbstractInstanceSource):
         instances = [
             SimpleBatchInstance.from_swe_bench(instance).to_full_batch_instance(self.deployment) for instance in ds
         ]
-        return _filter_batch_items(instances, filter_=self.filter, slice_=self.slice, shuffle=self.shuffle)
+        filtered_items = _filter_batch_items(instances, filter_=self.filter, slice_=self.slice, shuffle=self.shuffle)
+        
+        # Add the post-startup commands to each instance
+        for instance in filtered_items:
+            instance.env.post_startup_commands.extend(self.post_startup_commands)
+        
+        return filtered_items
 
     @property
     def id(self) -> str:

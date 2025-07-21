@@ -387,6 +387,96 @@ class ImageParsingHistoryProcessor(BaseModel):
         return segments if has_images else [{"type": "text", "text": content}]
 
 
+class FirstMLastNObservations(LastNObservations):
+    """Elide all but the first m and last n observations or remove tagged observations.
+
+    Typical configuration:
+
+    ```yaml
+    agent:
+      history_processors:
+        - type: first_m_last_n_observations
+          m: 4
+          n: 100
+    ```
+    """
+
+    m: int
+    """Number of observations to keep from the start."""
+
+    n: int
+    """Number of observations to keep."""
+
+    polling: int = 1
+    """How many steps to keep between updating the number of observations to keep.
+    This is useful for caching, as we want to remove more and more messages, but every
+    time we change the history, we need to cache everything again.
+    Effectively, we will now keep between `n` and `n+polling` observations.
+    """
+
+    always_remove_output_for_tags: set[str] = {"remove_output"}
+    """Any observation with a `tags` field containing one of these strings will be elided,
+    even if it is one of the last n observations.
+    """
+
+    always_keep_output_for_tags: set[str] = {"keep_output"}
+    """Any observation with a `tags` field containing one of these strings will be kept,
+    even if it is not one of the last n observations.
+    """
+
+    type: Literal["first_m_last_n_observations"] = "first_m_last_n_observations"
+    """Do not change. Used for (de)serialization."""
+
+    # pydantic config
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("n")
+    def validate_n(cls, n: int) -> int:
+        if n <= 0:
+            msg = "n must be a positive integer"
+            raise ValueError(msg)
+        return n
+
+    @field_validator("m")
+    def validate_m(cls, m: int) -> int:
+        if m <= 0:
+            msg = "m must be a positive integer"
+            raise ValueError(msg)
+        return m
+
+    def _get_omit_indices(self, history: History) -> list[int]:
+        observation_indices = [
+            idx
+            for idx, entry in enumerate(history)
+            if entry.get("message_type") == "observation" and not entry.get("is_demo", False)
+        ]
+        last_removed_idx = max(0, (len(observation_indices) // self.polling) * self.polling - self.n)
+        
+        # Note: We never remove the first m observations, as they are the template and initial messages.
+        return observation_indices[self.m:last_removed_idx]
+
+    def __call__(self, history: History) -> History:
+        new_history = []
+        omit_content_idxs = self._get_omit_indices(history)
+        for idx, entry in enumerate(history):
+            tags = set(entry.get("tags", []))
+            if ((idx not in omit_content_idxs) or (tags & self.always_keep_output_for_tags)) and not (
+                tags & self.always_remove_output_for_tags
+            ):
+                new_history.append(entry)
+            else:
+                data = entry.copy()
+                assert data.get("message_type") == "observation", (
+                    f"Expected observation for dropped entry, got: {data.get('message_type')}"
+                )
+                num_text_lines, num_images = _get_content_stats(data)
+                data["content"] = f"Old environment output: ({num_text_lines} lines omitted)"
+                if num_images > 0:
+                    data["content"] += f" ({num_images} images omitted)"
+                new_history.append(data)
+        return new_history
+
+
 HistoryProcessor = Annotated[
     DefaultHistoryProcessor
     | LastNObservations
@@ -394,6 +484,7 @@ HistoryProcessor = Annotated[
     | TagToolCallObservations
     | CacheControlHistoryProcessor
     | RemoveRegex
-    | ImageParsingHistoryProcessor,
+    | ImageParsingHistoryProcessor
+    | FirstMLastNObservations,
     Field(discriminator="type"),
 ]
