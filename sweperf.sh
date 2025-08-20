@@ -1,5 +1,4 @@
 sweagent run-batch \
-    --config config/default_sweperf.yaml \
-    --agent.model.per_instance_cost_limit 5.00 \
-    --num_workers 4 \
-    --instances.post_startup_commands='["cd /testbed", "git add -A && git commit -m \"Auto commit\" || true"]' \
+    --config config/default_sweperf_gemini.yaml \
+    --num_workers 8 \
+    --instances.post_startup_commands='["git -c user.name=\"SWE-Agent\" -c user.email=\"sweagent@sweagent.com\" commit -am \"Auto commit\" || true"]' \

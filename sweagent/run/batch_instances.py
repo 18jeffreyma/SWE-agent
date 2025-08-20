@@ -109,7 +109,7 @@ class SimpleBatchInstance(BaseModel):
     # Ignore instead of allow because they should be added as `extra_fields`
     model_config = ConfigDict(extra="ignore")
 
-    def to_full_batch_instance(self, deployment: DeploymentConfig) -> BatchInstance:
+    def to_full_batch_instance(self, deployment: DeploymentConfig, reset=True) -> BatchInstance:
         """Merge the deployment options into the `SimpleBatchInstance` object to get a full `BatchInstance`."""
         # Very important: Make a copy of the deployment config because it will be shared among instances!!!
         deployment = deployment.model_copy(deep=True)
@@ -131,7 +131,7 @@ class SimpleBatchInstance(BaseModel):
         elif "github" in self.repo_name:
             repo = GithubRepoConfig(github_url=self.repo_name, base_commit=self.base_commit)
         elif "/" not in self.repo_name:
-            repo = PreExistingRepoConfig(repo_name=self.repo_name, base_commit=self.base_commit)
+            repo = PreExistingRepoConfig(repo_name=self.repo_name, base_commit=self.base_commit, reset=reset)
         else:
             repo = LocalRepoConfig(path=Path(self.repo_name), base_commit=self.base_commit)
         if isinstance(deployment, LocalDeploymentConfig):
@@ -446,7 +446,7 @@ class SWEPerfInstances(BaseModel, AbstractInstanceSource):
     """Deployment configuration. Note that the image_name option is overwritten by the images specified in the task instances.
     """
 
-    type: Literal["swe_perf"] = "swe_perf"
+    type: Literal["swefficiency"] = "swefficiency"
     """Discriminator for (de)serialization/CLI. Do not change."""
 
     filter: str = ".*"
@@ -477,7 +477,7 @@ class SWEPerfInstances(BaseModel, AbstractInstanceSource):
             return str(self.path_override)
 
         dataset_mapping = {
-            "full": "sweperf/sweperf",
+            "full": "swefficiency/swefficiency",
         }
 
         if self.subset not in dataset_mapping:
@@ -497,7 +497,7 @@ class SWEPerfInstances(BaseModel, AbstractInstanceSource):
             self.deployment.platform = "linux/amd64"
 
         instances = [
-            SimpleBatchInstance.from_swe_bench(instance).to_full_batch_instance(self.deployment) for instance in ds
+            SimpleBatchInstance.from_swe_bench(instance).to_full_batch_instance(self.deployment, reset=False) for instance in ds
         ]
         filtered_items = _filter_batch_items(instances, filter_=self.filter, slice_=self.slice, shuffle=self.shuffle)
         
@@ -509,7 +509,7 @@ class SWEPerfInstances(BaseModel, AbstractInstanceSource):
 
     @property
     def id(self) -> str:
-        return f"swe_perf_{self.subset}_{self.split}"
+        return f"swefficiency_{self.subset}_{self.split}"
 
 
 BatchInstanceSourceConfig = (
