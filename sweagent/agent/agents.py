@@ -440,6 +440,49 @@ class RetryAgent(AbstractAgent):
         return AgentRunResult(info=data["info"], trajectory=data["trajectory"])
 
 
+class PythonPathManager:
+    """A context manager to temporarily add a path to the PYTHONPATH environment variable."""
+
+    def __init__(
+        self,
+        cmd: str,
+        env: SWEEnv,
+        timeout: int,
+        conditions: list[str] = ["pip install"],
+    ):
+        self.should_run = any(condition in cmd for condition in conditions)
+        self.save_cmd = "export OLDPYTHONPATH=$PYTHONPATH && unset PYTHONPATH"
+        self.restore_cmd = "export PYTHONPATH=$OLDPYTHONPATH && unset OLDPYTHONPATH"
+        self.env = env
+        self.timeout = timeout
+
+    def __enter__(self):
+        if self.should_run:
+            try:
+                self.env.communicate(
+                    input=self.save_cmd,
+                    timeout=self.timeout,
+                    check="raise"
+                )
+            except CommandTimeoutError:
+                raise ValueError(
+                    "Command to save pythonpath timed out. Please increase the execution timeout."
+                )
+        
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.should_run:
+            try:
+                self.env.communicate(
+                    input=self.restore_cmd,
+                    timeout=self.timeout,
+                    check="raise"
+                )
+            except CommandTimeoutError:
+                raise ValueError(
+                    "Command to restore pythonpath timed out. Please increase the execution timeout."
+                )
+
+
 class DefaultAgent(AbstractAgent):
     def __init__(
         self,
@@ -722,7 +765,6 @@ class DefaultAgent(AbstractAgent):
                 "agent": self.name,
                 "tool_calls": step.tool_calls,
                 "message_type": "action",
-                "thinking_blocks": step.thinking_blocks,
             },
         )
 
@@ -959,34 +1001,44 @@ class DefaultAgent(AbstractAgent):
         self._chook.on_action_started(step=step)
         execution_t0 = time.perf_counter()
         run_action: str = self.tools.guard_multiline_input(step.action).strip()
-        try:
-            step.observation = self._env.communicate(
-                input=run_action,
-                timeout=self.tools.config.execution_timeout,
-                check="raise" if self._always_require_zero_exit_code else "ignore",
-            )
-        except CommandTimeoutError:
-            self._n_consecutive_timeouts += 1
-            if self._n_consecutive_timeouts >= self.tools.config.max_consecutive_execution_timeouts:
-                msg = "Exiting agent due to too many consecutive execution timeouts"
-                self.logger.critical(msg)
-                step.execution_time = time.perf_counter() - execution_t0
-                self._total_execution_time += step.execution_time
-                raise
+        
+        # HACK: If contains pip install, save PYTHONPATH before running the command.
+        with PythonPathManager(
+            run_action,
+            self._env,
+            self.tools.config.execution_timeout,
+            conditions=["pip install"]
+        ):
+
             try:
-                self._env.interrupt_session()
-            except Exception as f:
-                self.logger.exception("Failed to interrupt session after command timeout: %s", f, exc_info=True)
-                step.execution_time = time.perf_counter() - execution_t0
-                self._total_execution_time += step.execution_time
-                raise
-            step.observation = Template(self.templates.command_cancelled_timeout_template).render(
-                **self._get_format_dict(),
-                timeout=self.tools.config.execution_timeout,
-                command=run_action,
-            )
-        else:
-            self._n_consecutive_timeouts = 0
+                step.observation = self._env.communicate(
+                    input=run_action,
+                    timeout=self.tools.config.execution_timeout,
+                    check="raise" if self._always_require_zero_exit_code else "ignore",
+                )
+            except CommandTimeoutError:
+                self._n_consecutive_timeouts += 1
+                if self._n_consecutive_timeouts >= self.tools.config.max_consecutive_execution_timeouts:
+                    msg = "Exiting agent due to too many consecutive execution timeouts"
+                    self.logger.critical(msg)
+                    step.execution_time = time.perf_counter() - execution_t0
+                    self._total_execution_time += step.execution_time
+                    raise
+                try:
+                    self._env.interrupt_session()
+                except Exception as f:
+                    self.logger.exception("Failed to interrupt session after command timeout: %s", f, exc_info=True)
+                    step.execution_time = time.perf_counter() - execution_t0
+                    self._total_execution_time += step.execution_time
+                    raise
+                step.observation = Template(self.templates.command_cancelled_timeout_template).render(
+                    **self._get_format_dict(),
+                    timeout=self.tools.config.execution_timeout,
+                    command=run_action,
+                )
+            else:
+                self._n_consecutive_timeouts = 0
+
         step.execution_time = time.perf_counter() - execution_t0
         self._total_execution_time += step.execution_time
         self._chook.on_action_executed(step=step)
@@ -1043,7 +1095,6 @@ class DefaultAgent(AbstractAgent):
             step.output = output["message"]
             # todo: Can't I override the parser in __init__?
             step.thought, step.action = self.tools.parse_actions(output)
-            step.thinking_blocks = output.get("thinking_blocks", [])
             if output.get("tool_calls") is not None:
                 step.tool_call_ids = [call["id"] for call in output["tool_calls"]]
                 step.tool_calls = output["tool_calls"]

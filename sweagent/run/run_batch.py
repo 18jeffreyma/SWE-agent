@@ -58,6 +58,7 @@ from sweagent.exceptions import ModelConfigurationError, TotalCostLimitExceededE
 from sweagent.run._progress import RunBatchProgressManager
 from sweagent.run.batch_instances import BatchInstance, BatchInstanceSourceConfig, SWEBenchInstances
 from sweagent.run.common import BasicCLI, ConfigHelper, save_predictions
+from sweagent.run.cpu_assignment import allocate_whole_cores
 from sweagent.run.hooks.abstract import CombinedRunHooks, RunHook
 from sweagent.run.hooks.apply_patch import SaveApplyPatchHook
 from sweagent.run.merge_predictions import merge_predictions
@@ -136,26 +137,13 @@ class RunBatchConfig(BaseSettings, cli_implicit_flags=False):
 class _BreakLoop(Exception):
     """Used for internal control flow"""
 
+def divide_cpus_among_workers(num_workers, num_cpus_per_worker=4):
+    cpu_groups = []
 
-def divide_cpus_among_workers(num_workers):
-    current_cpus = list(os.sched_getaffinity(0))
-    num_cpus = len(current_cpus)
-    if num_workers <= 0:
-        raise ValueError("Number of workers must be greater than 0")
-
-    base_cpus_per_worker = num_cpus // num_workers
-    remainder = num_cpus % num_workers
-
-    # Divide this into groups.
-    cpu_groups = [
-        current_cpus[i * base_cpus_per_worker : (i + 1) * base_cpus_per_worker]
-        for i in range(num_workers)
-    ]
-    print(f"Divided {num_cpus} CPUs into {num_workers} groups, each with {base_cpus_per_worker} CPUs.")
-    print(f"CPU groups: {cpu_groups}")
+    for i in range(num_workers):
+        cpu_groups.append(list(range(i * num_cpus_per_worker, (i + 1) * num_cpus_per_worker)))
 
     return cpu_groups
-
 
 class RunBatch:
     def __init__(
@@ -212,9 +200,16 @@ class RunBatch:
         self.cpu_groups_queue = None
         if use_cpu_groups:
             self.cpu_groups_queue = queue.Queue()
-            cpu_groups = divide_cpus_among_workers(self._num_workers)
-            for group in cpu_groups:
-                self.cpu_groups_queue.put_nowait(group)
+
+            cpu_infos = allocate_whole_cores(
+                self._num_workers,
+                4,
+                1, # HACK: AWS VM has this.
+                reserve_cores=4,
+            )
+
+            for cpu_info in cpu_infos:
+                self.cpu_groups_queue.put_nowait(cpu_info)
 
     @property
     def _model_id(self) -> str:
@@ -371,10 +366,12 @@ class RunBatch:
         if self.cpu_groups_queue is not None:
             try:
                 cpu_groups = self.cpu_groups_queue.get_nowait()
-                if isinstance(instance.env.deployment, DockerDeploymentConfig):                    
-                    instance.env.deployment.docker_args.extend(
-                        ["--cpuset-cpus", ",".join(str(cpu) for cpu in cpu_groups)]
-                    )
+                if isinstance(instance.env.deployment, DockerDeploymentConfig):   
+                    for arg_name, arg_value in cpu_groups.items():
+                        arg_name = arg_name.replace("_", "-")  # Docker args use dashes
+                        instance.env.deployment.docker_args.extend(
+                            [f"--{arg_name}", str(arg_value)]
+                        )
                     
             except queue.Empty:
                 self.logger.warning("No CPU groups available, running without CPU groups.")
