@@ -137,14 +137,6 @@ class RunBatchConfig(BaseSettings, cli_implicit_flags=False):
 class _BreakLoop(Exception):
     """Used for internal control flow"""
 
-def divide_cpus_among_workers(num_workers, num_cpus_per_worker=4):
-    cpu_groups = []
-
-    for i in range(num_workers):
-        cpu_groups.append(list(range(i * num_cpus_per_worker, (i + 1) * num_cpus_per_worker)))
-
-    return cpu_groups
-
 class RunBatch:
     def __init__(
         self,
@@ -413,13 +405,13 @@ class RunBatch:
             agent.logger.error(traceback.format_exc())  # type: ignore[attr-defined]
             raise
         finally:
+            if cpu_groups is not None:
+                self.cpu_groups_queue.put_nowait(cpu_groups) 
+            
             env.close()
         save_predictions(self.output_dir, instance.problem_statement.id, result)
         self._chooks.on_instance_completed(result=result)
         
-        if cpu_groups is not None:
-            self.cpu_groups_queue.put_nowait(cpu_groups) 
-
         return result
 
     def should_skip(self, instance: BatchInstance) -> bool | str:
