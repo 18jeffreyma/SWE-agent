@@ -71,7 +71,7 @@ class SWEEnv:
         """
         super().__init__()
         self.deployment = deployment
-        self.deployment._runtime_timeout = 30.0
+        self.deployment._runtime_timeout = 1800.0
         
         self.repo = repo
         self._post_startup_commands = post_startup_commands
