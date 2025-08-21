@@ -197,7 +197,7 @@ class RunBatch:
                 self._num_workers,
                 4,
                 1, # HACK: AWS VM has this.
-                reserve_cores=4,
+                reserve_cores=8,
             )
 
             for cpu_info in cpu_infos:

@@ -13,7 +13,8 @@ instances:
       - '--memory=16g'
 agent:
   model:
-    name: bedrock/anthropic.claude-sonnet-4-20250514-v1:0 # Latest version of Claude Sonnet 4.
+    # name: bedrock/invoke/us.anthropic.claude-3-7-sonnet-20250219-v1:0
+    name: anthropic/claude-3-7-sonnet-20250219 # Latest version of Claude Sonnet 4.
     per_instance_cost_limit: 1.00
     per_instance_call_limit: 100
     temperature: 0.0
